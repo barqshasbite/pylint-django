@@ -4,6 +4,7 @@ from astroid import (
     MANAGER, nodes, InferenceError, inference_tip,
     UseInferenceDefault
 )
+from astroid.exceptions import AstroidImportError
 from astroid.nodes import ClassDef, Attribute
 
 from pylint_django.utils import node_is_subclass
@@ -92,8 +93,33 @@ def infer_key_classes(node, context=None):
                 # comparison below
                 module_name += '.models'
                 # ensure that module is loaded in astroid_cache, for cases when models is a package
-                if module_name not in MANAGER.astroid_cache:
-                    MANAGER.ast_from_module_name(module_name)
+                try:
+                    if module_name not in MANAGER.astroid_cache:
+                        MANAGER.ast_from_module_name(module_name)
+                except AstroidImportError:
+                    # The code above handles the most common use case well, but
+                    # is ultimately flawed for a number of reasons. One of
+                    # the main reasons is that Django allows you to give an app
+                    # a custom app_label that does not have to map to a module
+                    # name, so the lookup is going to fail. Another reason is
+                    # that you can have your apps nested under a custom package
+                    # and not at the root as standalone packages. The code below
+                    # is a simple fix for apps that are nested under the project
+                    # package one level deep at most.
+                    # For nested apps that exist inside the project package, we
+                    # prepend the root project package name to the module name
+                    # before looking it up.
+                    # E.g. ForeignKey('polls.Poll') in project 'foobar' becomes
+                    # 'polls.models' from the code above, which fails the module
+                    # lookup, and then becomes 'foobar.polls.models' which works
+                    # assuming the 'polls' app is located at 'foobar.polls'.
+                    current_module = node.frame()
+                    while not isinstance(current_module, nodes.Module):
+                        current_module = current_module.parent.frame()
+                    root_module_name = current_module.name.split(".")[0]
+                    module_name = root_module_name + "." + module_name
+                    if module_name not in MANAGER.astroid_cache:
+                        MANAGER.ast_from_module_name(module_name)
 
             # create list from dict_values, because it may be modified in a loop
             for module in list(MANAGER.astroid_cache.values()):
